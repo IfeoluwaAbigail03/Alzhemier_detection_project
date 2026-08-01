@@ -6,7 +6,6 @@ from tensorflow.keras.applications.resnet50 import preprocess_input
 from PIL import Image
 import io
 import matplotlib.pyplot as plt
-import matplotlib.cm as cm
 
 # ── Page config ───────────────────────────────────────────────────────────
 st.set_page_config(
@@ -18,7 +17,12 @@ st.set_page_config(
 # ── Load model ────────────────────────────────────────────────────────────
 @st.cache_resource
 def load_model():
-    return tf.keras.models.load_model('alzheimer_resnet50.keras')
+    try:
+        model = tf.keras.models.load_model('alzheimer_resnet50.keras')
+        return model
+    except Exception as e:
+        st.error(f"Model loading error: {e}")
+        return None
 
 model = load_model()
 
@@ -56,27 +60,32 @@ def get_gradcam(img_array):
         img_processed = preprocess_input(
             np.expand_dims(img_resized.astype(np.float32), axis=0)
         )
-        # Find last conv layer
+
+        # Find last conv layer inside ResNet50
         last_conv = None
-        for layer in reversed(model.layers):
-            if isinstance(layer, tf.keras.layers.Conv2D):
-                last_conv = layer
+        for layer in model.layers:
+            if hasattr(layer, 'layers'):
+                for inner in reversed(layer.layers):
+                    if isinstance(inner, tf.keras.layers.Conv2D):
+                        last_conv = inner
+                        break
+            if last_conv:
                 break
+
         if last_conv is None:
-            # Try inner ResNet50 layers
-            for layer in model.layers:
-                if hasattr(layer, 'layers'):
-                    for inner in reversed(layer.layers):
-                        if isinstance(inner, tf.keras.layers.Conv2D):
-                            last_conv = inner
-                            break
-                if last_conv:
+            for layer in reversed(model.layers):
+                if isinstance(layer, tf.keras.layers.Conv2D):
+                    last_conv = layer
                     break
+
+        if last_conv is None:
+            return None
 
         grad_model = tf.keras.models.Model(
             inputs  = model.inputs,
             outputs = [last_conv.output, model.output]
         )
+
         with tf.GradientTape() as tape:
             conv_out, preds = grad_model(img_processed)
             loss = preds[:, np.argmax(preds[0])]
@@ -91,7 +100,9 @@ def get_gradcam(img_array):
         heatmap_col = cv2.cvtColor(heatmap_col, cv2.COLOR_BGR2RGB)
         overlay     = cv2.addWeighted(img_resized, 0.6, heatmap_col, 0.4, 0)
         return overlay
+
     except Exception as e:
+        st.warning(f"Grad-CAM error: {e}")
         return None
 
 # ── Header ────────────────────────────────────────────────────────────────
@@ -101,10 +112,10 @@ st.divider()
 
 # ── Model metrics ─────────────────────────────────────────────────────────
 col1, col2, col3, col4 = st.columns(4)
-col1.metric("Test Accuracy",  "97.8%",   "on 6,600 test images")
-col2.metric("Model",          "ResNet50", "ImageNet transfer learning")
-col3.metric("Training data",  "44,000+",  "MRI scans")
-col4.metric("Classes",        "4",        "severity levels")
+col1.metric("Test Accuracy",  "97.8%",    "on 6,600 test images")
+col2.metric("Model",          "ResNet50",  "ImageNet transfer learning")
+col3.metric("Training data",  "44,000+",   "MRI scans")
+col4.metric("Classes",        "4",         "severity levels")
 
 st.divider()
 
@@ -125,72 +136,77 @@ st.divider()
 
 # ── Upload section ────────────────────────────────────────────────────────
 st.subheader("🔬 Upload MRI Scan for Classification")
-uploaded_file = st.file_uploader(
-    "Upload a brain MRI image (JPG, PNG)",
-    type=['jpg', 'jpeg', 'png']
-)
 
-if uploaded_file is not None:
-    # Read image
-    file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
-    img_bgr    = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
-    img_rgb    = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-
-    col_img, col_result = st.columns(2)
-
-    with col_img:
-        st.image(img_rgb, caption="Uploaded MRI Scan",
-                 use_container_width=True)
-
-    with col_result:
-        with st.spinner("Analysing MRI scan..."):
-            pred_class, confidence, probs = predict(img_rgb)
-
-        info = CLASS_INFO[pred_class]
-
-        st.markdown(f"""
-        <div style='background:{info["color"]}22;border-left:6px solid {info["color"]};
-             padding:16px;border-radius:6px;margin-bottom:16px;'>
-        <h3 style='margin:0;color:{info["color"]};'>{info["icon"]} {pred_class}</h3>
-        <p style='margin:8px 0 4px;'><b>Confidence:</b> {confidence*100:.1f}%</p>
-        <p style='margin:0;font-size:14px;'>{info["description"]}</p>
-        </div>
-        """, unsafe_allow_html=True)
-
-        # Probability chart
-        st.subheader("Class Probabilities")
-        fig, ax = plt.subplots(figsize=(6, 3))
-        colors  = [CLASS_INFO[c]['color'] for c in CLASSES]
-        values  = [probs[c] for c in CLASSES]
-        bars    = ax.barh(CLASSES, values, color=colors)
-        ax.set_xlim(0, 1)
-        ax.set_xlabel('Probability')
-        for bar, val in zip(bars, values):
-            ax.text(val + 0.01, bar.get_y() + bar.get_height()/2,
-                    f'{val*100:.1f}%', va='center', fontsize=9)
-        plt.tight_layout()
-        st.pyplot(fig)
-        plt.close()
-
-    # Grad-CAM
-    st.subheader("🔥 Grad-CAM — Brain Regions Driving the Prediction")
-    with st.spinner("Generating Grad-CAM heatmap..."):
-        gradcam = get_gradcam(img_rgb)
-
-    if gradcam is not None:
-        col_orig, col_cam = st.columns(2)
-        with col_orig:
-            st.image(cv2.resize(img_rgb, (IMG_SIZE, IMG_SIZE)),
-                     caption="Original MRI", use_container_width=True)
-        with col_cam:
-            st.image(gradcam,
-                     caption="Grad-CAM Heatmap — highlighted regions influence prediction",
-                     use_container_width=True)
-    else:
-        st.info("Grad-CAM not available for this image.")
-
+if model is None:
+    st.error("Model failed to load. Please check deployment logs.")
 else:
-    st.info("👆 Upload an MRI scan above to get a prediction.")
+    uploaded_file = st.file_uploader(
+        "Upload a brain MRI image (JPG, PNG)",
+        type=['jpg', 'jpeg', 'png']
+    )
+
+    if uploaded_file is not None:
+        # Read image
+        file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
+        img_bgr    = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+        img_rgb    = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+
+        col_img, col_result = st.columns(2)
+
+        with col_img:
+            st.image(img_rgb, caption="Uploaded MRI Scan",
+                     use_container_width=True)
+
+        with col_result:
+            with st.spinner("Analysing MRI scan..."):
+                pred_class, confidence, probs = predict(img_rgb)
+
+            info = CLASS_INFO[pred_class]
+
+            st.markdown(f"""
+            <div style='background:{info["color"]}22;border-left:6px solid {info["color"]};
+                 padding:16px;border-radius:6px;margin-bottom:16px;'>
+            <h3 style='margin:0;color:{info["color"]};'>{info["icon"]} {pred_class}</h3>
+            <p style='margin:8px 0 4px;'><b>Confidence:</b> {confidence*100:.1f}%</p>
+            <p style='margin:0;font-size:14px;'>{info["description"]}</p>
+            </div>
+            """, unsafe_allow_html=True)
+
+            # Probability chart
+            st.subheader("Class Probabilities")
+            fig, ax = plt.subplots(figsize=(6, 3))
+            colors  = [CLASS_INFO[c]['color'] for c in CLASSES]
+            values  = [probs[c] for c in CLASSES]
+            bars    = ax.barh(CLASSES, values, color=colors)
+            ax.set_xlim(0, 1)
+            ax.set_xlabel('Probability')
+            for bar, val in zip(bars, values):
+                ax.text(val + 0.01, bar.get_y() + bar.get_height()/2,
+                        f'{val*100:.1f}%', va='center', fontsize=9)
+            plt.tight_layout()
+            st.pyplot(fig)
+            plt.close()
+
+        # Grad-CAM
+        st.subheader("🔥 Grad-CAM — Brain Regions Driving the Prediction")
+        with st.spinner("Generating Grad-CAM heatmap..."):
+            gradcam = get_gradcam(img_rgb)
+
+        if gradcam is not None:
+            col_orig, col_cam = st.columns(2)
+            with col_orig:
+                st.image(cv2.resize(img_rgb, (IMG_SIZE, IMG_SIZE)),
+                         caption="Original MRI",
+                         use_container_width=True)
+            with col_cam:
+                st.image(gradcam,
+                         caption="Grad-CAM — highlighted regions influence prediction",
+                         use_container_width=True)
+        else:
+            st.info("Grad-CAM visualisation not available for this image.")
+
+    else:
+        st.info("👆 Upload an MRI scan above to get a prediction.")
 
 st.divider()
 
@@ -207,5 +223,9 @@ st.markdown("""
 """)
 
 st.divider()
-st.warning("⚕️ **Clinical Disclaimer:** This tool is for research and educational purposes only. It is not a substitute for professional medical diagnosis. Always consult a qualified neurologist.")
-st.caption("Built with Python · TensorFlow · ResNet50 · Streamlit | Ifeoluwa Abigail Oyedemi")
+st.warning("""
+⚕️ **Clinical Disclaimer:** This tool is for research and educational
+purposes only. It is not a substitute for professional medical diagnosis.
+Always consult a qualified neurologist for medical decisions.
+""")
+st.caption("Built with Python · TensorFlow 2.19 · ResNet50 · Keras 3.10 · Streamlit | Ifeoluwa Abigail Oyedemi")
