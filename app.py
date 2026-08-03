@@ -6,6 +6,8 @@ from tensorflow.keras.applications.resnet50 import preprocess_input
 from PIL import Image
 import io
 import matplotlib.pyplot as plt
+import json
+import base64
 
 # ── Page config ───────────────────────────────────────────────────────────
 st.set_page_config(
@@ -24,7 +26,17 @@ def load_model():
         st.error(f"Model loading error: {e}")
         return None
 
-model = load_model()
+# ── Load demo results ─────────────────────────────────────────────────────
+@st.cache_data
+def load_demo():
+    try:
+        with open('alzheimer_demo_results.json', 'r') as f:
+            return json.load(f)
+    except:
+        return []
+
+model        = load_model()
+demo_results = load_demo()
 
 # ── Constants ─────────────────────────────────────────────────────────────
 IMG_SIZE = 192
@@ -61,7 +73,6 @@ def get_gradcam(img_array):
             np.expand_dims(img_resized.astype(np.float32), axis=0)
         )
 
-        # Find last conv layer inside ResNet50
         last_conv = None
         for layer in model.layers:
             if hasattr(layer, 'layers'):
@@ -134,8 +145,59 @@ for i, (cls, info) in enumerate(CLASS_INFO.items()):
 
 st.divider()
 
+# ── Sample MRI images per class ───────────────────────────────────────────
+st.subheader("🖼️ Sample MRI Scans — What Each Stage Looks Like")
+st.markdown("Real MRI scans from the test set, classified by the model with confidence scores:")
+
+class_order = ['NonDemented', 'VeryMildDemented', 'MildDemented', 'ModerateDemented']
+
+if demo_results:
+    img_cols = st.columns(4)
+    for i, class_name in enumerate(class_order):
+        sample = next((r for r in demo_results if r['true_class'] == class_name), None)
+        if sample:
+            with img_cols[i]:
+                info      = CLASS_INFO[class_name]
+                img_bytes = base64.b64decode(sample['image_b64'])
+                img       = Image.open(io.BytesIO(img_bytes))
+                st.image(img, use_container_width=True)
+                st.markdown(f"""
+                <div style='background:{info["color"]}22;
+                     border-left:3px solid {info["color"]};
+                     padding:8px;border-radius:4px;text-align:center;'>
+                <b>{info["icon"]} {class_name}</b><br>
+                <small>Confidence: {sample["confidence"]*100:.1f}%</small><br>
+                <small style='color:#666;'>{info["description"]}</small>
+                </div>
+                """, unsafe_allow_html=True)
+
+    # Show all 12 samples in expandable section
+    with st.expander("📋 View all 12 sample predictions"):
+        for row_start in range(0, len(demo_results), 4):
+            batch = demo_results[row_start:row_start+4]
+            batch_cols = st.columns(4)
+            for j, result in enumerate(batch):
+                with batch_cols[j]:
+                    info      = CLASS_INFO[result['pred_class']]
+                    img_bytes = base64.b64decode(result['image_b64'])
+                    img       = Image.open(io.BytesIO(img_bytes))
+                    correct   = result['correct']
+                    status    = "✅" if correct else "❌"
+                    st.image(img, use_container_width=True)
+                    st.markdown(f"""
+                    <div style='background:{info["color"]}22;
+                         border-left:3px solid {info["color"]};
+                         padding:6px;border-radius:4px;font-size:11px;'>
+                    {status} <b>{result["pred_class"]}</b><br>
+                    True: {result["true_class"]}<br>
+                    Conf: {result["confidence"]*100:.1f}%
+                    </div>
+                    """, unsafe_allow_html=True)
+
+st.divider()
+
 # ── Upload section ────────────────────────────────────────────────────────
-st.subheader("🔬 Upload MRI Scan for Classification")
+st.subheader("🔬 Upload Your Own MRI Scan for Classification")
 
 if model is None:
     st.error("Model failed to load. Please check deployment logs.")
@@ -146,7 +208,6 @@ else:
     )
 
     if uploaded_file is not None:
-        # Read image
         file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
         img_bgr    = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
         img_rgb    = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
@@ -172,7 +233,6 @@ else:
             </div>
             """, unsafe_allow_html=True)
 
-            # Probability chart
             st.subheader("Class Probabilities")
             fig, ax = plt.subplots(figsize=(6, 3))
             colors  = [CLASS_INFO[c]['color'] for c in CLASSES]
@@ -187,7 +247,6 @@ else:
             st.pyplot(fig)
             plt.close()
 
-        # Grad-CAM
         st.subheader("🔥 Grad-CAM — Brain Regions Driving the Prediction")
         with st.spinner("Generating Grad-CAM heatmap..."):
             gradcam = get_gradcam(img_rgb)
@@ -221,6 +280,33 @@ st.markdown("""
 | VeryMildDemented | 95.5% | 98.4% | 96.9% |
 | **Overall** | **97.9%** | **98.1%** | **97.9%** |
 """)
+
+st.divider()
+
+# ── Architecture ──────────────────────────────────────────────────────────
+st.subheader("🏗️ Model Architecture")
+col_a, col_b = st.columns(2)
+
+with col_a:
+    st.markdown("""
+    **Transfer Learning Pipeline:**
+    - Base: ResNet50 pretrained on ImageNet
+    - GlobalAveragePooling2D
+    - Dense(512, ReLU) + BatchNorm + Dropout(0.5)
+    - Dense(256, ReLU) + BatchNorm + Dropout(0.3)
+    - Dense(4, Softmax)
+    """)
+
+with col_b:
+    st.markdown("""
+    **Training Setup:**
+    - Image size: 192×192
+    - Batch size: 32
+    - Learning rate: 0.0001
+    - Epochs: 15 with early stopping
+    - Data augmentation: rotation, flip, zoom, shift
+    - Callbacks: EarlyStopping, ReduceLROnPlateau
+    """)
 
 st.divider()
 st.warning("""
