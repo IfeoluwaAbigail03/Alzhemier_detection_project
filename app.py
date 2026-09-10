@@ -65,6 +65,38 @@ def predict(img_array):
     probs      = {c: float(p) for c, p in zip(CLASSES, preds)}
     return pred_class, confidence, probs
 
+# ── Grad-CAM model builder (cached so it's only built once) ───────────────
+@st.cache_resource
+def build_gradcam_model(_model):
+    """
+    Rebuilds the forward pass symbolically (starting from a fresh
+    tf.keras.Input) so nested layers — like a ResNet50 base wrapped
+    inside an outer Sequential model — get proper graph connectivity.
+    This lets us grab an intermediate Conv2D layer's output, which
+    isn't otherwise possible once a model has only been called eagerly
+    (e.g. via model.predict on real data).
+    Reuses the original layer objects, so trained weights are preserved.
+    """
+    inp = tf.keras.Input(shape=(IMG_SIZE, IMG_SIZE, 3))
+    x = inp
+    last_conv_output = None
+
+    for layer in _model.layers:
+        if hasattr(layer, 'layers'):  # nested submodel (e.g. ResNet50 base)
+            for inner in layer.layers:
+                x = inner(x)
+                if isinstance(inner, tf.keras.layers.Conv2D):
+                    last_conv_output = x
+        else:
+            x = layer(x)
+            if isinstance(layer, tf.keras.layers.Conv2D):
+                last_conv_output = x
+
+    if last_conv_output is None:
+        return None
+
+    return tf.keras.models.Model(inputs=inp, outputs=[last_conv_output, x])
+
 # ── Grad-CAM function ─────────────────────────────────────────────────────
 def get_gradcam(img_array):
     try:
@@ -73,33 +105,13 @@ def get_gradcam(img_array):
             np.expand_dims(img_resized.astype(np.float32), axis=0)
         )
 
-        last_conv = None
-        for layer in model.layers:
-            if hasattr(layer, 'layers'):
-                for inner in reversed(layer.layers):
-                    if isinstance(inner, tf.keras.layers.Conv2D):
-                        last_conv = inner
-                        break
-            if last_conv:
-                break
-
-        if last_conv is None:
-            for layer in reversed(model.layers):
-                if isinstance(layer, tf.keras.layers.Conv2D):
-                    last_conv = layer
-                    break
-
-        if last_conv is None:
+        grad_model = build_gradcam_model(model)
+        if grad_model is None:
             return None
-
-        grad_model = tf.keras.models.Model(
-            inputs  = model.inputs,
-            outputs = [last_conv.output, model.output]
-        )
 
         with tf.GradientTape() as tape:
             conv_out, preds = grad_model(img_processed)
-            loss = preds[:, np.argmax(preds[0])]
+            loss = preds[:, tf.argmax(preds[0])]
 
         grads       = tape.gradient(loss, conv_out)
         pooled      = tf.reduce_mean(grads, axis=(0, 1, 2))
