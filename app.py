@@ -78,41 +78,39 @@ def predict(img_array):
 @st.cache_resource
 def build_gradcam_model(_model):
     """
-    Rebuilds the forward pass symbolically (starting from a fresh
-    tf.keras.Input) so nested layers — like a ResNet50 base wrapped
-    inside an outer Sequential model — get proper graph connectivity.
-    This lets us grab an intermediate Conv2D layer's output, which
-    isn't otherwise possible once a model has only been called eagerly
-    (e.g. via model.predict on real data).
-    Reuses the original layer objects, so trained weights are preserved.
+    ResNet50 has residual/skip connections, so it CANNOT be safely
+    replayed layer-by-layer as if it were a flat sequential stack
+    (that breaks the graph and causes channel-mismatch errors like
+    'expected axis -1 ... to have value 64, but received ... 256').
+
+    Instead, we pull the last conv layer's output directly from
+    ResNet50's own functional graph (which already preserves the
+    skip connections correctly), then re-attach the outer head
+    layers (GAP -> Dense -> BatchNorm -> Dropout -> Dense), which
+    genuinely are sequential and safe to chain manually.
     """
-    inp = tf.keras.Input(shape=(IMG_SIZE, IMG_SIZE, 3))
-    x = inp
-    last_conv_output = None
+    base_model = _model.layers[0]  # the nested ResNet50 functional model
 
-    for layer in _model.layers:
-        if hasattr(layer, 'layers'):  # nested submodel (e.g. ResNet50 base)
-            for inner in layer.layers:
-
-                # Skip the nested model's InputLayer
-                if isinstance(inner, tf.keras.layers.InputLayer):
-                    continue
-
-                x = inner(x)
-
-                if isinstance(inner, tf.keras.layers.Conv2D):
-                    last_conv_output = x
-
-        else:
-            x = layer(x)
-
-            if isinstance(layer, tf.keras.layers.Conv2D):
-                last_conv_output = x
-
-    if last_conv_output is None:
+    last_conv_layer_name = 'conv5_block3_out'  # last conv activation in ResNet50
+    try:
+        last_conv_layer = base_model.get_layer(last_conv_layer_name)
+    except ValueError:
         return None
 
-    return tf.keras.models.Model(inputs=inp, outputs=[last_conv_output, x])
+    # Correctly-wired feature extractor: input -> (last conv output, resnet output)
+    feat_extractor = tf.keras.models.Model(
+        inputs=base_model.input,
+        outputs=[last_conv_layer.output, base_model.output]
+    )
+
+    inp = tf.keras.Input(shape=(IMG_SIZE, IMG_SIZE, 3))
+    conv_out, x = feat_extractor(inp)
+
+    # These head layers really are sequential, so chaining them is safe
+    for layer in _model.layers[1:]:
+        x = layer(x)
+
+    return tf.keras.models.Model(inputs=inp, outputs=[conv_out, x])
 
 
 # ── Grad-CAM function ─────────────────────────────────────────────────────
