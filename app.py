@@ -9,12 +9,14 @@ import matplotlib.pyplot as plt
 import json
 import base64
 
+
 # ── Page config ───────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="Alzheimer's MRI Classifier",
     page_icon="🧠",
     layout="wide"
 )
+
 
 # ── Load model ────────────────────────────────────────────────────────────
 @st.cache_resource
@@ -26,6 +28,7 @@ def load_model():
         st.error(f"Model loading error: {e}")
         return None
 
+
 # ── Load demo results ─────────────────────────────────────────────────────
 @st.cache_data
 def load_demo():
@@ -35,12 +38,15 @@ def load_demo():
     except:
         return []
 
+
 model        = load_model()
 demo_results = load_demo()
+
 
 # ── Constants ─────────────────────────────────────────────────────────────
 IMG_SIZE = 192
 CLASSES  = ['MildDemented', 'ModerateDemented', 'NonDemented', 'VeryMildDemented']
+
 
 CLASS_INFO = {
     'NonDemented'     : {'color': '#1D9E75', 'icon': '✅', 'severity': 0,
@@ -53,17 +59,20 @@ CLASS_INFO = {
                          'description': 'Moderate dementia detected. Immediate medical attention required.'}
 }
 
+
 # ── Prediction function ───────────────────────────────────────────────────
 def predict(img_array):
     img_resized   = cv2.resize(img_array, (IMG_SIZE, IMG_SIZE))
     img_processed = preprocess_input(
         np.expand_dims(img_resized.astype(np.float32), axis=0)
     )
+
     preds      = model.predict(img_processed, verbose=0)[0]
     pred_class = CLASSES[np.argmax(preds)]
     confidence = float(np.max(preds))
     probs      = {c: float(p) for c, p in zip(CLASSES, preds)}
     return pred_class, confidence, probs
+
 
 # ── Grad-CAM model builder (cached so it's only built once) ───────────────
 @st.cache_resource
@@ -84,11 +93,19 @@ def build_gradcam_model(_model):
     for layer in _model.layers:
         if hasattr(layer, 'layers'):  # nested submodel (e.g. ResNet50 base)
             for inner in layer.layers:
+
+                # Skip the nested model's InputLayer
+                if isinstance(inner, tf.keras.layers.InputLayer):
+                    continue
+
                 x = inner(x)
+
                 if isinstance(inner, tf.keras.layers.Conv2D):
                     last_conv_output = x
+
         else:
             x = layer(x)
+
             if isinstance(layer, tf.keras.layers.Conv2D):
                 last_conv_output = x
 
@@ -96,6 +113,7 @@ def build_gradcam_model(_model):
         return None
 
     return tf.keras.models.Model(inputs=inp, outputs=[last_conv_output, x])
+
 
 # ── Grad-CAM function ─────────────────────────────────────────────────────
 def get_gradcam(img_array):
@@ -128,10 +146,12 @@ def get_gradcam(img_array):
         st.warning(f"Grad-CAM error: {e}")
         return None
 
+
 # ── Header ────────────────────────────────────────────────────────────────
 st.title("🧠 Alzheimer's MRI Classifier")
 st.markdown("Upload a brain MRI scan to classify Alzheimer's severity using **ResNet50 transfer learning** trained on 44,000+ MRI images.")
 st.divider()
+
 
 # ── Model metrics ─────────────────────────────────────────────────────────
 col1, col2, col3, col4 = st.columns(4)
@@ -142,9 +162,11 @@ col4.metric("Classes",        "4",         "severity levels")
 
 st.divider()
 
+
 # ── Severity scale ────────────────────────────────────────────────────────
 st.subheader("📊 Alzheimer's Severity Scale")
 cols = st.columns(4)
+
 for i, (cls, info) in enumerate(CLASS_INFO.items()):
     with cols[i]:
         st.markdown(f"""
@@ -155,7 +177,9 @@ for i, (cls, info) in enumerate(CLASS_INFO.items()):
         </div>
         """, unsafe_allow_html=True)
 
+
 st.divider()
+
 
 # ── Sample MRI images per class ───────────────────────────────────────────
 st.subheader("🖼️ Sample MRI Scans — What Each Stage Looks Like")
@@ -165,14 +189,18 @@ class_order = ['NonDemented', 'VeryMildDemented', 'MildDemented', 'ModerateDemen
 
 if demo_results:
     img_cols = st.columns(4)
+
     for i, class_name in enumerate(class_order):
         sample = next((r for r in demo_results if r['true_class'] == class_name), None)
+
         if sample:
             with img_cols[i]:
                 info      = CLASS_INFO[class_name]
                 img_bytes = base64.b64decode(sample['image_b64'])
                 img       = Image.open(io.BytesIO(img_bytes))
+
                 st.image(img, use_container_width=True)
+
                 st.markdown(f"""
                 <div style='background:{info["color"]}22;
                      border-left:3px solid {info["color"]};
@@ -183,11 +211,13 @@ if demo_results:
                 </div>
                 """, unsafe_allow_html=True)
 
+
     # Show all 12 samples in expandable section
     with st.expander("📋 View all 12 sample predictions"):
         for row_start in range(0, len(demo_results), 4):
             batch = demo_results[row_start:row_start+4]
             batch_cols = st.columns(4)
+
             for j, result in enumerate(batch):
                 with batch_cols[j]:
                     info      = CLASS_INFO[result['pred_class']]
@@ -195,7 +225,9 @@ if demo_results:
                     img       = Image.open(io.BytesIO(img_bytes))
                     correct   = result['correct']
                     status    = "✅" if correct else "❌"
+
                     st.image(img, use_container_width=True)
+
                     st.markdown(f"""
                     <div style='background:{info["color"]}22;
                          border-left:3px solid {info["color"]};
@@ -206,13 +238,16 @@ if demo_results:
                     </div>
                     """, unsafe_allow_html=True)
 
+
 st.divider()
+
 
 # ── Upload section ────────────────────────────────────────────────────────
 st.subheader("🔬 Upload Your Own MRI Scan for Classification")
 
 if model is None:
     st.error("Model failed to load. Please check deployment logs.")
+
 else:
     uploaded_file = st.file_uploader(
         "Upload a brain MRI image (JPG, PNG)",
@@ -252,37 +287,47 @@ else:
             bars    = ax.barh(CLASSES, values, color=colors)
             ax.set_xlim(0, 1)
             ax.set_xlabel('Probability')
+
             for bar, val in zip(bars, values):
                 ax.text(val + 0.01, bar.get_y() + bar.get_height()/2,
                         f'{val*100:.1f}%', va='center', fontsize=9)
+
             plt.tight_layout()
             st.pyplot(fig)
             plt.close()
 
+
         st.subheader("🔥 Grad-CAM — Brain Regions Driving the Prediction")
+
         with st.spinner("Generating Grad-CAM heatmap..."):
             gradcam = get_gradcam(img_rgb)
 
         if gradcam is not None:
             col_orig, col_cam = st.columns(2)
+
             with col_orig:
                 st.image(cv2.resize(img_rgb, (IMG_SIZE, IMG_SIZE)),
                          caption="Original MRI",
                          use_container_width=True)
+
             with col_cam:
                 st.image(gradcam,
                          caption="Grad-CAM — highlighted regions influence prediction",
                          use_container_width=True)
+
         else:
             st.info("Grad-CAM visualisation not available for this image.")
 
     else:
         st.info("👆 Upload an MRI scan above to get a prediction.")
 
+
 st.divider()
+
 
 # ── Performance table ─────────────────────────────────────────────────────
 st.subheader("📈 Model Performance")
+
 st.markdown("""
 | Class | Precision | Recall | F1 Score |
 |---|---|---|---|
@@ -293,7 +338,9 @@ st.markdown("""
 | **Overall** | **97.9%** | **98.1%** | **97.9%** |
 """)
 
+
 st.divider()
+
 
 # ── Architecture ──────────────────────────────────────────────────────────
 st.subheader("🏗️ Model Architecture")
@@ -309,6 +356,7 @@ with col_a:
     - Dense(4, Softmax)
     """)
 
+
 with col_b:
     st.markdown("""
     **Training Setup:**
@@ -320,10 +368,13 @@ with col_b:
     - Callbacks: EarlyStopping, ReduceLROnPlateau
     """)
 
+
 st.divider()
+
 st.warning("""
 ⚕️ **Clinical Disclaimer:** This tool is for research and educational
 purposes only. It is not a substitute for professional medical diagnosis.
 Always consult a qualified neurologist for medical decisions.
 """)
+
 st.caption("Built with Python · TensorFlow 2.19 · ResNet50 · Keras 3.10 · Streamlit | Ifeoluwa Abigail Oyedemi")
